@@ -11,7 +11,13 @@ from typing import Any, Dict, Mapping, Optional
 
 
 AUTO_INPUT = "__default__"
-PIPELINE_BRANCHES = ("GeD", "BGO")
+PIPELINE_BRANCHES = ("GeD", "BGO", "both")
+
+# Resolve .cfmodule symlinks before locating this module's own scripts.
+# This is independent of Airflow home, the checkout name and the current cwd.
+PIPELINE_ROOT = Path(__file__).resolve().parents[1] / "pipeline"
+STAGE_SCRIPT = str(PIPELINE_ROOT / "stage_files.py")
+BKG_CUT_SCRIPT = str(PIPELINE_ROOT / "bkg_cut.py")
 
 RAW_ROOT = Path("/home/gamma/workspace/data/raw")
 DEST_MAP = {
@@ -100,7 +106,7 @@ def normalize_pipeline_branch(value: Any = None) -> str:
     if value is None:
         return "GeD"
     if not isinstance(value, str) or not value.strip():
-        raise _parameter_error("unknown", "pipeline_branch", "expected GeD or BGO")
+        raise _parameter_error("unknown", "pipeline_branch", "expected GeD, BGO or both")
     normalized = {branch.lower(): branch for branch in PIPELINE_BRANCHES}.get(
         value.strip().lower()
     )
@@ -111,8 +117,10 @@ def normalize_pipeline_branch(value: Any = None) -> str:
     return normalized
 
 
-def raw_dirs_for_branch(branch: str) -> Dict[str, str]:
+def raw_dirs_for_branch(branch: str) -> Dict[str, Any]:
     branch = normalize_pipeline_branch(branch)
+    if branch == "both":
+        return {family: raw_dirs_for_branch(family) for family in ("GeD", "BGO")}
     return {kind: str(path) for kind, path in RAW_SUBDIRS_BY_BRANCH[branch].items()}
 
 
@@ -137,10 +145,24 @@ def _selected_or_default(
 
 
 def resolve_pipeline_config(
-    params: Mapping[str, Any], dirs: Optional[Mapping[str, str]] = None
+    params: Mapping[str, Any], dirs: Optional[Mapping[str, Any]] = None
 ) -> Dict[str, Any]:
     """Resolve only the inputs used by the selected pipeline branch."""
     branch = normalize_pipeline_branch(params.get("pipeline_branch"))
+    if branch == "both":
+        if dirs is not None and set(dirs) != {"GeD", "BGO"}:
+            raise RuntimeError("[init_pipelines:both] raw directory keys must be GeD and BGO")
+        return {
+            "branch": "both",
+            "pipeline_branch": "both",
+            "branches": {
+                family: resolve_pipeline_config(
+                    {**params, "pipeline_branch": family},
+                    None if dirs is None else dirs[family],
+                )
+                for family in ("GeD", "BGO")
+            },
+        }
     input_params = INPUT_PARAM_BY_BRANCH[branch]
 
     if branch == "GeD":
@@ -211,8 +233,11 @@ def resolve_pipeline_config(
     return payload
 
 
-def postprocessing_task_for_branch(branch: str) -> str:
-    """Return the only post-staging task that should run for a branch."""
-    if normalize_pipeline_branch(branch) == "GeD":
+def postprocessing_task_for_branch(branch: str) -> str | list[str]:
+    """Select one postprocessing path or both for a combined initialization."""
+    branch = normalize_pipeline_branch(branch)
+    if branch == "both":
+        return ["background_cut", "bgo_staging_complete"]
+    if branch == "GeD":
         return "background_cut"
     return "bgo_staging_complete"

@@ -24,7 +24,7 @@ and the pure helper module
 
 | Parameter | Default | Validation or behavior |
 | --- | --- | --- |
-| `pipeline_branch` | `GeD` | `GeD` or `BGO`; missing legacy values resolve to `GeD` |
+| `pipeline_branch` | `GeD` | `GeD`, `BGO`, or `both`; missing legacy values resolve to `GeD` |
 | `destination` | `tdrss` | one of `lcurve`, `tsmap`, `fast`, `tdrss`; ignored by BGO |
 | `data_challenge` | `DC4` | `DC3` or `DC4`; GeD only |
 | `source_path`, `background_path`, `orientation_path`, `response_path` | `__default__` | Wasabi key or local path; GeD only |
@@ -32,7 +32,19 @@ and the pure helper module
 | `lightcurve_path`, three LUT paths, `bgo_orientation_path` | `__default__` | Wasabi key or local path; BGO only |
 
 Only parameters belonging to the selected branch are resolved. BGO forces the
-destination to `tdrss` and bypasses `background_cut`.
+destination to `tdrss` and bypasses `background_cut`. With `both`, both families
+are validated and staged in one initialization run; GeD uses the configured
+destination/data challenge and BGO keeps its own preset and `tdrss` destination.
+The two orientations are controlled independently by `orientation_path` and
+`bgo_orientation_path`. They are not assumed to describe the same GRB event.
+
+Single-family triggers keep their existing XCom shapes. In `both` mode,
+`resolve_config` and `stage_all_files` contain separate `GeD`/`BGO` mappings,
+`create_products_dir` returns `products_dirs` with one path per family, and
+`create_symlinks` returns the linked inputs keyed by family. Each products
+directory includes `initialization_manifest.json` describing its family.
+The manifest is descriptive metadata; current COSIDAG selection does not yet
+filter by this marker.
 
 ## Runtime overrides
 

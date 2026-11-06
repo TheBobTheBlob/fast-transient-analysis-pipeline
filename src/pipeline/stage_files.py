@@ -158,13 +158,8 @@ def download_or_use_one(
     return str(target_file)
 
 
-def stage_inputs(inputs, dirs, *, wasabi_base=DEFAULT_WASABI_BASE, downloader=None):
-    """Stage exactly the supplied input mapping into category-specific dirs.
-
-    ``inputs`` and ``dirs`` must have identical keys. This makes the raw
-    directory assignment explicit and prevents accidentally processing inputs
-    from the non-selected pipeline branch.
-    """
+def validate_stage_inputs(inputs, dirs):
+    """Validate a staging plan before downloading or publishing anything."""
     if not isinstance(inputs, dict) or not inputs:
         raise ValueError("[stage] --inputs must be a non-empty JSON object")
     if not isinstance(dirs, dict):
@@ -175,7 +170,6 @@ def stage_inputs(inputs, dirs, *, wasabi_base=DEFAULT_WASABI_BASE, downloader=No
             f"inputs={sorted(inputs)}, dirs={sorted(dirs)}"
         )
 
-    download = downloader or download_or_use_one
     planned_targets = {}
     resolved_dirs = {}
     for kind, remote_or_local in inputs.items():
@@ -200,6 +194,13 @@ def stage_inputs(inputs, dirs, *, wasabi_base=DEFAULT_WASABI_BASE, downloader=No
             )
         planned_targets[target_key] = kind
 
+    return resolved_dirs
+
+
+def stage_inputs(inputs, dirs, *, wasabi_base=DEFAULT_WASABI_BASE, downloader=None):
+    """Stage exactly one input family into category-specific raw dirs."""
+    resolved_dirs = validate_stage_inputs(inputs, dirs)
+    download = downloader or download_or_use_one
     return {
         kind: download(
             remote_or_local,
@@ -211,21 +212,52 @@ def stage_inputs(inputs, dirs, *, wasabi_base=DEFAULT_WASABI_BASE, downloader=No
     }
 
 
+def stage_pipeline_config(config, *, downloader=None):
+    """Stage one family or both, preserving raw-directory and key isolation."""
+    if not isinstance(config, dict):
+        raise ValueError("[stage] --config must be a JSON object")
+    combined = config.get("pipeline_branch") == "both"
+    plans = config.get("branches") if combined else {config.get("pipeline_branch"): config}
+    expected = {"GeD", "BGO"} if combined else {config.get("pipeline_branch")}
+    if not isinstance(plans, dict) or set(plans) != expected or not expected <= {"GeD", "BGO"}:
+        raise ValueError("[stage] configuration must select GeD, BGO or both")
+    targets = set()
+    for family, plan in plans.items():
+        if not isinstance(plan, dict) or plan.get("pipeline_branch") != family:
+            raise ValueError("[stage] branch configuration does not match its family")
+        dirs = validate_stage_inputs(plan.get("inputs"), plan.get("dirs"))
+        if not isinstance(plan.get("wasabi_base"), str) or not plan["wasabi_base"].strip():
+            raise ValueError("[stage] each branch needs a non-empty wasabi_base")
+        for kind, path in plan["inputs"].items():
+            target = str((dirs[kind] / Path(path).name).resolve())
+            if target in targets:
+                raise ValueError("[stage] branches would overwrite the same raw file")
+            targets.add(target)
+    result = {family: stage_inputs(plan["inputs"], plan["dirs"],
+                wasabi_base=plan["wasabi_base"], downloader=downloader)
+              for family, plan in plans.items()}
+    return result if combined else result[config["pipeline_branch"]]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Stage files from Wasabi or local path")
-    parser.add_argument("--inputs", type=str, required=True, help="JSON string of inputs")
-    parser.add_argument("--dirs", type=str, required=True, help="JSON string of directories")
-    parser.add_argument("--wasabi-base", type=str, default=DEFAULT_WASABI_BASE, help="Base Wasabi key for relative inputs")
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--inputs", type=str, help="JSON string of one family's inputs")
+    selection.add_argument("--config", type=str, help="Resolved GeD, BGO or both initialization config")
+    parser.add_argument("--dirs", type=str, help="JSON string of directories for --inputs")
+    parser.add_argument("--wasabi-base", type=str, default=DEFAULT_WASABI_BASE)
     args = parser.parse_args()
-
-    inputs = json.loads(args.inputs)
-    dirs = json.loads(args.dirs)
-    wasabi_base = args.wasabi_base
-
-    staged = stage_inputs(inputs, dirs, wasabi_base=wasabi_base)
-    
-    # Print JSON result to stdout for XCom
+    if args.config is not None:
+        if args.dirs is not None:
+            parser.error("--dirs cannot be combined with --config")
+        staged = stage_pipeline_config(json.loads(args.config))
+    else:
+        if args.dirs is None:
+            parser.error("--dirs is required with --inputs")
+        staged = stage_inputs(json.loads(args.inputs), json.loads(args.dirs), wasabi_base=args.wasabi_base)
+    # The last stdout line is the complete XCom result for both families.
     print(json.dumps(staged))
+
 
 if __name__ == "__main__":
     main()

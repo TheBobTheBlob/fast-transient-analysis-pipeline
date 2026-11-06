@@ -233,7 +233,7 @@ class AirflowDagDefinitionTests(unittest.TestCase):
 
         self.assertEqual(dag.dag_id, "init_pipelines")
         self.assertEqual(
-            dag.params.get_param("pipeline_branch").schema["enum"], ["GeD", "BGO"]
+            dag.params.get_param("pipeline_branch").schema["enum"], ["GeD", "BGO", "both"]
         )
         self.assertEqual(
             dag.params.get_param("pipeline_branch").schema["section"], "General"

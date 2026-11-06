@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
 
 # Airflow loads this DAG through a ``*.cfmodule`` symlink whose directory is
 # not automatically importable as a Python package. Add the real DAG folder so
@@ -30,19 +28,25 @@ from init_pipeline_config import (
     AUTO_INPUT,
     BGO_DEFAULTS,
     BGO_ORIENTATION_KEYS,
+    BKG_CUT_SCRIPT,
     DATA_CHALLENGE_DEFAULTS,
     DEST_MAP,
     PIPELINE_BRANCHES,
+    STAGE_SCRIPT,
     normalize_pipeline_branch,
     postprocessing_task_for_branch,
     raw_dirs_for_branch,
     resolve_pipeline_config,
 )
 
+from init_pipeline_products import (
+    create_product_directories,
+    create_product_links,
+    ensure_dir,
+)
+
 # === Config ===
 COSIPY_PYTHON = os.getenv("COSIPY_PYTHON", "/home/gamma/envs/cosipy/bin/python")
-STAGE_SCRIPT = "/home/gamma/airflow/pipeline/stage_files.py"
-BKG_CUT_SCRIPT = "/home/gamma/airflow/pipeline/bkg_cut.py"
 
 def wasabi_keys(base: str, folder: str, file_names: list[str]) -> list[str]:
     return [f"{base}/{folder}/{file_name}" for file_name in file_names]
@@ -307,48 +311,6 @@ def dropdown_choices(kind: str) -> list[str]:
                 result.append(value)
     return result
 
-# === Helpers ===
-def ensure_dir(p: Path) -> Path:
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def next_run_products_dir(base_dest: Path) -> Path:
-    # Determines the next run directory based on date and incremental index
-    now = datetime.now()
-    yyyy_mm = now.strftime("%Y_%m")
-    yymmdd = now.strftime("%y%m%d")
-    base_month_dir = ensure_dir(base_dest / yyyy_mm)
-    pat = re.compile(rf"^{yymmdd}(\d{{3}})$")
-    max_idx = -1
-    for d in base_month_dir.iterdir():
-        if d.is_dir() and pat.match(d.name):
-            max_idx = max(max_idx, int(pat.match(d.name).group(1)))
-    run_dir = ensure_dir(base_month_dir / f"{yymmdd}{max_idx+1:03d}")
-    return ensure_dir(run_dir / "products")
-
-
-def make_symlinks(target_dir: Path, files_by_kind: Dict[str, str]) -> Dict[str, str]:
-    """Create symlinks in target_dir for all paths in files_by_kind."""
-    result = {}
-    links_by_name = {}
-    for kind, paths in files_by_kind.items():
-        link = target_dir / Path(paths).name
-        if link.name in links_by_name:
-            raise ValueError(
-                f"[init_pipelines] inputs {links_by_name[link.name]!r} and {kind!r} "
-                f"have the same basename {link.name!r}; refusing to overwrite a product"
-            )
-        links_by_name[link.name] = kind
-        if link.is_symlink() and link.resolve() != Path(paths).resolve():
-            raise FileExistsError(f"[init_pipelines] existing symlink has a different target: {link}")
-        if link.exists() and not link.is_symlink():
-            raise FileExistsError(f"[init_pipelines] product path already exists: {link}")
-        if not link.exists() and not link.is_symlink():
-            link.symlink_to(paths)
-            print(f"[symlink] {link} -> {paths}")
-        result[kind] = str(link)
-    return result
-
 # === DAG ===
 with DAG(
     dag_id="init_pipelines",
@@ -356,14 +318,14 @@ with DAG(
     schedule=None,
     catchup=False,
     tags=["cosiflow", "init"],
-    description="Initialize and stage GeD or BGO COSI pipeline data",
+    description="Initialize and stage GeD, BGO or both COSI pipeline data",
     params={
         "pipeline_branch": Param(
             default="GeD",
             enum=list(PIPELINE_BRANCHES),
             type="string",
             title="Pipeline branch",
-            description="Select the data family to resolve, stage, and initialize.",
+            description="Select GeD, BGO, or both (two separate products directories).",
             section="General",
         ),
         "destination": Param(
@@ -456,8 +418,10 @@ with DAG(
     def prepare_raw_dirs(**context):
         branch = normalize_pipeline_branch(context["params"].get("pipeline_branch"))
         dirs = raw_dirs_for_branch(branch)
-        for directory in dirs.values():
-            ensure_dir(Path(directory))
+        groups = dirs.values() if branch == "both" else [dirs]
+        for group in groups:
+            for directory in group.values():
+                ensure_dir(Path(directory))
         return dirs
 
     t_prepare = PythonOperator(task_id="prepare_raw_dirs", python_callable=prepare_raw_dirs)
@@ -475,17 +439,12 @@ with DAG(
         task_id="stage_all_files",
         bash_command='''
 set -euo pipefail
-"$COSIPY_PYTHON" "$STAGE_SCRIPT" \
-  --inputs "$STAGE_INPUTS" \
-  --dirs "$STAGE_DIRS" \
-  --wasabi-base "$WASABI_BASE"
+"$COSIPY_PYTHON" "$STAGE_SCRIPT" --config "$STAGE_CONFIG"
 ''',
         env={
             "COSIPY_PYTHON": COSIPY_PYTHON,
             "STAGE_SCRIPT": STAGE_SCRIPT,
-            "STAGE_INPUTS": "{{ ti.xcom_pull(task_ids='resolve_config')['inputs'] | tojson }}",
-            "STAGE_DIRS": "{{ ti.xcom_pull(task_ids='resolve_config')['dirs'] | tojson }}",
-            "WASABI_BASE": "{{ ti.xcom_pull(task_ids='resolve_config')['wasabi_base'] }}",
+            "STAGE_CONFIG": "{{ ti.xcom_pull(task_ids='resolve_config') | tojson }}",
         },
         append_env=True,
         do_xcom_push=True,
@@ -493,34 +452,20 @@ set -euo pipefail
 
     # === 4. Create products directory ===
     def create_products_dir(ti):
-        # Create the unique products directory for this run
-        cfg = ti.xcom_pull(task_ids="resolve_config")
-        pdir = next_run_products_dir(Path(cfg["destination_root"]))
-        return {"products_dir": str(pdir)}
+        return create_product_directories(ti.xcom_pull(task_ids="resolve_config"))
 
     t_products = PythonOperator(task_id="create_products_dir", python_callable=create_products_dir)
 
     # === 5. Create symlinks ===
     def create_symlinks(ti):
-        """
-        Create symlinks in products/ and return the paths for the downstream tasks.
-        """
-        staged_json = ti.xcom_pull(task_ids="stage_all_files")
-        if isinstance(staged_json, str):
-            staged = json.loads(staged_json)
-        else:
-            staged = staged_json
-
-        products_dir = Path(ti.xcom_pull(task_ids="create_products_dir")["products_dir"])
-
-        cfg = ti.xcom_pull(task_ids="resolve_config")
-        expected_keys = set(cfg["inputs"])
-        if set(staged) != expected_keys:
-            raise ValueError(
-                f"[init_pipelines:{cfg['pipeline_branch']}] staged keys must be "
-                f"{sorted(expected_keys)}, got {sorted(staged)}"
-            )
-        return make_symlinks(products_dir, staged)
+        staged = ti.xcom_pull(task_ids="stage_all_files")
+        if isinstance(staged, str):
+            staged = json.loads(staged)
+        return create_product_links(
+            ti.xcom_pull(task_ids="resolve_config"),
+            staged,
+            ti.xcom_pull(task_ids="create_products_dir"),
+        )
 
     t_link = PythonOperator(task_id="create_symlinks", python_callable=create_symlinks)
 
@@ -544,9 +489,9 @@ set -euo pipefail
         env={
             "COSIPY_PYTHON": COSIPY_PYTHON,
             "BKG_CUT_SCRIPT": BKG_CUT_SCRIPT,
-            "SOURCE_PATH": "{{ ti.xcom_pull(task_ids='create_symlinks')['source'] }}",
-            "BACKGROUND_PATH": "{{ ti.xcom_pull(task_ids='create_symlinks')['background'] }}",
-            "EPS_TIME": "{{ ti.xcom_pull(task_ids='resolve_config')['eps_time'] }}",
+            "SOURCE_PATH": "{{ ti.xcom_pull(task_ids='create_symlinks').get('GeD', ti.xcom_pull(task_ids='create_symlinks'))['source'] }}",
+            "BACKGROUND_PATH": "{{ ti.xcom_pull(task_ids='create_symlinks').get('GeD', ti.xcom_pull(task_ids='create_symlinks'))['background'] }}",
+            "EPS_TIME": "{{ (ti.xcom_pull(task_ids='resolve_config').get('branches') or {}).get('GeD', ti.xcom_pull(task_ids='resolve_config'))['eps_time'] }}",
         },
         append_env=True,
     )

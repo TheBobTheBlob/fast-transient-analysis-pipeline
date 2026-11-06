@@ -4,7 +4,7 @@
 
 | DAG ID | Type | Runtime summary | Purpose |
 | --- | --- | --- | --- |
-| `init_pipelines` | standard Airflow DAG | Airflow plus managed COSIpy commands | Resolve and stage GeD or BGO inputs |
+| `init_pipelines` | standard Airflow DAG | Airflow plus managed COSIpy commands | Resolve and stage GeD, BGO or both input families |
 | `cosidag_BGO` | COSIDAG | `cosipy`, `bct`, `nimcosipy`, Airflow | BGO transient analysis |
 | `cosidag_GeD` | COSIDAG | `cosipy`, `bct`, Airflow | Binned GeD analysis |
 | `cosidag_ARMselection` | COSIDAG | `cosipy`, Airflow | Unbinned ARM selection and localization |
@@ -29,9 +29,19 @@ prepare_raw_dirs
   -> initialization_complete
 ```
 
-The DAG creates a products directory; it does not use
-`TriggerDagRunOperator`. Parameters and defaults are documented in
+The DAG creates a products directory for a single-family trigger, or two
+independent products directories when `pipeline_branch=both`. In combined mode,
+`select_postprocessing` selects both downstream paths: GeD background cutting
+and BGO staging completion. The join waits for both selected paths and fails
+if either fails. Existing task IDs and single-family output shapes remain
+available. The DAG does not use `TriggerDagRunOperator`. Parameters and defaults are documented in
 [configuration](configuration.md).
+
+The initializer resolves `stage_files.py` and `bkg_cut.py` from the module's
+own `src/pipeline` directory using the resolved location of
+`init_pipeline_config.py`. This also works when Airflow imports the DAG through
+the installed `.cfmodule` symlink. No scripts or compatibility symlinks are
+required directly under `/home/gamma/airflow/pipeline`.
 
 ## `cosidag_BGO`
 

@@ -43,3 +43,12 @@ The documentation workflow runs the strict build and external link check on
 relevant pull requests and `dev` pushes. It validates documentation changes but
 does not publish a website. Public hosting requires separate project approval.
 The generated `site` directory is ignored and must not be committed.
+
+
+## Combined initialization regressions
+
+`test_init_pipelines_both.py` verifies independent branch configuration,
+preflight validation before downloads, raw-target collision detection,
+separate products directories/manifests, combined and legacy CLI/XCom formats,
+and GeD-only background inputs. Fixtures use temporary local files; no Wasabi
+request, scientific run or live Airflow task is triggered by these tests.
