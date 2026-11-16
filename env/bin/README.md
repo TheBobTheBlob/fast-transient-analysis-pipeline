@@ -7,6 +7,7 @@ Docker Compose stack, and hot-loads the Fast Transient Analysis Pipeline.
 
 - Git;
 - Docker Engine or Docker Desktop with Docker Compose v2;
+- Let Docker run without sudo
 - Bash and standard Unix tools (`awk`, `grep`, `id`, `mktemp`, `sed`).
 
 Clone FasTP into a workspace. COSIflow will be cloned beside it if missing:
