@@ -14,7 +14,7 @@ Clone FasTP into a workspace. COSIflow will be cloned beside it if missing:
 ```bash
 mkdir -p ~/cosi
 cd ~/cosi
-git clone https://github.com/cositools/fast-transient-analysis-pipeline.git
+git clone -b dev https://github.com/cositools/fast-transient-analysis-pipeline.git
 cd fast-transient-analysis-pipeline/env/bin
 ./install
 ```
